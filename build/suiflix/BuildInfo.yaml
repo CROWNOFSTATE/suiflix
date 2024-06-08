@@ -1,0 +1,29 @@
+---
+compiled_package_info:
+  package_name: suiflix
+  address_alias_instantiation:
+    std: "0000000000000000000000000000000000000000000000000000000000000001"
+    sui: "0000000000000000000000000000000000000000000000000000000000000002"
+    suiflix: "0000000000000000000000000000000000000000000000000000000000000000"
+  source_digest: 842E32FF9F3E05793C3AA25A07CD8AD8BCD88E5CD0C6839A08C1F4B9F93DF535
+  build_flags:
+    dev_mode: false
+    test_mode: false
+    generate_docs: false
+    install_dir: ~
+    force_recompilation: false
+    lock_file: "./Move.lock"
+    fetch_deps_only: false
+    skip_fetch_latest_git_deps: false
+    default_flavor: sui
+    default_edition: ~
+    deps_as_root: false
+    silence_warnings: false
+    warnings_are_errors: false
+    additional_named_addresses: {}
+    lint_flag:
+      no_lint: false
+      lint: false
+dependencies:
+  - MoveStdlib
+  - Sui
