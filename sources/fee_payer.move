@@ -3,57 +3,61 @@ module suiflix::suiflix {
     use std::vector;
     use sui::transfer;
     use std::string::String;
-    use sui::coin::{Self, Coin};
-    use sui::clock::{Self, Clock};
-    use sui::object::{Self, ID, UID};
-    use sui::balance::{Self, Balance};
-    use sui::tx_context::{Self, TxContext};
-    use sui::table::{Self, Table};
+    use sui::coin;
+    use sui::clock;
+    use sui::object::{self, ID, UID};
+    use sui::balance;
+    use sui::tx_context::{self, TxContext};
+    use sui::table::{self, Table};
 
     // Struct representing the Platform where users can pay to view movies.
     struct Platform has key, store {
-        id: UID,                        // Unique identifier for the Platform
-        name: String,                   // Name of the Platform
-        balance: Balance<SUI>,          // Balance of SUI tokens held by the Platform
-        users: vector<address>,         // List of addresses representing users registered on the Platform
-        transactions: Table<ID, ViewingTransaction>, // Table storing all viewing transactions
-        movies: Table<ID, Movie>,       // Table storing all movies available on the Platform
-        owner: address,                 // Address of the Platform owner
+        id: UID,                        
+        name: String,                   
+        balance: Balance<SUI>,          
+        users: vector<address>,         
+        transactions: Table<ID, ViewingTransaction>, 
+        movies: Table<ID, Movie>,       
+        owner: address,                 
     }
 
     // Struct representing a User on the Platform.
     struct User has key, store {
-        id: UID,                        // Unique identifier for the User
-        user: address,                  // Address of the User
-        platform_id: ID,                // Identifier of the Platform the User is registered on
-        balance: Balance<SUI>,          // Balance of SUI tokens held by the User
-        arrears: u64,                   // Outstanding balance or amount the User owes
+        id: UID,                        
+        address: address,               
+        platform_id: ID,                
+        balance: Balance<SUI>,          
+        outstanding_balance: u64,       
+        movies_on_credit: vector<ID>,   // List of movie IDs viewed on credit
     }
 
     // Struct representing a Viewing Transaction on the Platform.
     struct ViewingTransaction has key, store {
-        id: UID,                        // Unique identifier for the Viewing Transaction
-        user_id: ID,                    // Identifier of the User who made the transaction
-        platform_id: ID,                // Identifier of the Platform where the transaction occurred
-        amount: u64,                    // Amount of SUI tokens paid for the transaction
-        movie_id: u64,                  // Identifier of the Movie viewed
-        viewed_date: u64,               // Timestamp when the movie was viewed
+        id: UID,                        
+        user_id: ID,                    
+        platform_id: ID,                
+        amount: u64,                    
+        movie_id: ID,                   
+        viewed_date: u64,               
     }
 
     // Struct representing a Movie available on the Platform.
     struct Movie has key, store {
-        id: UID,                        // Unique identifier for the Movie
-        user_id: ID,                    // Identifier of the User who uploaded the movie
-        platform_id: ID,                // Identifier of the Platform where the movie is available
-        title: String,                  // Title of the Movie
-        amount: u64,                    // Amount of SUI tokens required to view the movie
-        added_date: u64,                // Timestamp when the movie was added to the Platform
+        id: UID,                        
+        user_id: ID,                    
+        platform_id: ID,                
+        title: String,                  
+        amount: u64,                    
+        added_date: u64,                
     }
 
     // Error codes used for various checks and balances in the module.
-    const ENotPlatformOwner: u64 = 0;  // Error code when the action is attempted by a non-owner
-    const EInsufficientFunds: u64 = 1; // Error code for insufficient funds in balance
-    const EInsufficientBalance: u64 = 2; // Error code for insufficient platform balance
+    const ENotPlatformOwner: u64 = 0;  
+    const EInsufficientFunds: u64 = 1; 
+    const EInsufficientBalance: u64 = 2; 
+    const EUserAlreadyExists: u64 = 3;
+    const EMovieNotFound: u64 = 4;
+    const EUserNotFound: u64 = 5;
 
     // Function to create a new Platform.
     public fun add_platform(
@@ -64,31 +68,36 @@ module suiflix::suiflix {
         Platform {
             id,
             name,
-            balance: balance::zero<SUI>(), // Initializing with zero balance
-            users: vector::empty<address>(), // Initializing with empty user list
-            movies: table::new<ID, Movie>(ctx), // Initializing empty movie table
-            transactions: table::new<ID, ViewingTransaction>(ctx), // Initializing empty transaction table
-            owner: tx_context::sender(ctx), // Setting the creator as the owner
+            balance: balance::zero<SUI>(),
+            users: vector::empty<address>(),
+            movies: table::new<ID, Movie>(ctx),
+            transactions: table::new<ID, ViewingTransaction>(ctx),
+            owner: tx_context::sender(ctx),
         }
     }
 
     // Function to register a new User on the Platform.
     public fun add_user(
-        user: address,
+        user_address: address,
         platform: &mut Platform,
         ctx: &mut TxContext
     ) : User {
         let id = object::new(ctx);
         let new_user = User {
             id,
-            user,
+            address: user_address,
             platform_id: object::id(platform),
-            arrears: 0, // Initializing arrears to zero
-            balance: balance::zero<SUI>(), // Initializing balance to zero
+            outstanding_balance: 0,
+            balance: balance::zero<SUI>(),
+            movies_on_credit: vector::empty<ID>(),
         };
 
+        // Check if the user already exists
+        let user_exists = vector::contains<address>(&platform.users, user_address);
+        assert!(!user_exists, EUserAlreadyExists);
+
         // Adding the user to the Platform's user list
-        vector::push_back<address>(&mut platform.users, user);
+        vector::push_back<address>(&mut platform.users, user_address);
 
         new_user
     }
@@ -107,13 +116,10 @@ module suiflix::suiflix {
             id: movie_id,
             user_id: object::id(user),
             platform_id: user.platform_id,
-            amount, // Setting the amount required to view the movie
-            title,  // Setting the title of the movie
-            added_date: clock::timestamp_ms(clock), // Setting the added date to current time
+            amount,
+            title,
+            added_date: clock::timestamp_ms(clock),
         };
-
-        // Increasing user's arrears by the amount of the movie
-        user.arrears = user.arrears + amount;
 
         // Adding the movie to the Platform's movie table
         table::add<ID, Movie>(&mut platform.movies, object::uid_to_inner(&movie.id), movie);
@@ -124,23 +130,24 @@ module suiflix::suiflix {
         user: &mut User,
         amount: Coin<SUI>,
     ) {
-        let coin = coin::into_balance(amount);
-        balance::join(&mut user.balance, coin); // Adding the coin balance to user's balance
+        let coin_balance = coin::into_balance(amount);
+        balance::join(&mut user.balance, coin_balance);
     }
 
     // Function for a User to pay to view a movie.
     public fun view_movie(
         platform: &mut Platform,
         user: &mut User,
-        amount: u64,
+        movie_id: ID,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
-        // Check if the User has enough balance to pay for the movie
-        assert!(balance::value(&user.balance) >= amount, EInsufficientFunds);
+        // Check if the movie exists
+        let movie = table::borrow<ID, Movie>(&platform.movies, movie_id);
+        assert!(balance::value(&user.balance) >= movie.amount, EInsufficientFunds);
 
         // Deduct the amount from the User's balance
-        let viewing_amount = coin::take(&mut user.balance, amount, ctx);
+        let viewing_amount = coin::take(&mut user.balance, movie.amount, ctx);
 
         // Transfer the deducted amount to the Platform owner
         transfer::public_transfer(viewing_amount, platform.owner);
@@ -151,16 +158,16 @@ module suiflix::suiflix {
             id: transaction_id,
             user_id: object::id(user),
             platform_id: user.platform_id,
-            amount,
-            movie_id: 0, // Placeholder for the movie ID (can be updated to actual movie ID)
-            viewed_date: clock::timestamp_ms(clock), // Setting the viewed date to current time
+            amount: movie.amount,
+            movie_id,
+            viewed_date: clock::timestamp_ms(clock),
         };
 
         // Add the viewing transaction to the Platform's transaction table
         table::add<ID, ViewingTransaction>(&mut platform.transactions, object::uid_to_inner(&transaction.id), transaction);
 
-        // Decrease the User's arrears by the amount paid
-        user.arrears = user.arrears - amount;
+        // Record the movie as viewed on credit
+        vector::push_back<ID>(&mut user.movies_on_credit, movie_id);
     }
 
     // Function to withdraw SUI tokens from the Platform's balance.
