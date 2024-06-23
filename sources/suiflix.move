@@ -18,6 +18,7 @@ module suiflix::suiflix {
         users: vector<address>,         // List of addresses representing users registered on the Platform
         transactions: Table<ID, ViewingTransaction>, // Table storing all viewing transactions
         movies: Table<ID, Movie>,       // Table storing all movies available on the Platform
+        subscriptions: Table<address, Subscription>, // Table storing all user subscriptions
         owner: address,                 // Address of the Platform owner
     }
 
@@ -36,7 +37,7 @@ module suiflix::suiflix {
         user_id: ID,                    // Identifier of the User who made the transaction
         platform_id: ID,                // Identifier of the Platform where the transaction occurred
         amount: u64,                    // Amount of SUI tokens paid for the transaction
-        movie_id: u64,                  // Identifier of the Movie viewed
+        movie_id: ID,                   // Identifier of the Movie viewed
         viewed_date: u64,               // Timestamp when the movie was viewed
     }
 
@@ -46,14 +47,42 @@ module suiflix::suiflix {
         user_id: ID,                    // Identifier of the User who uploaded the movie
         platform_id: ID,                // Identifier of the Platform where the movie is available
         title: String,                  // Title of the Movie
+        description: String,            // Description of the Movie
+        genre: String,                  // Genre of the Movie
         amount: u64,                    // Amount of SUI tokens required to view the movie
         added_date: u64,                // Timestamp when the movie was added to the Platform
+    }
+
+    // Struct representing a Subscription on the Platform.
+    struct Subscription has key, store {
+        user: address,                  // Address of the User
+        platform_id: ID,                // Identifier of the Platform the subscription is for
+        start_date: u64,                // Timestamp when the subscription started
+        end_date: u64,                  // Timestamp when the subscription ends
     }
 
     // Error codes used for various checks and balances in the module.
     const ENotPlatformOwner: u64 = 0;  // Error code when the action is attempted by a non-owner
     const EInsufficientFunds: u64 = 1; // Error code for insufficient funds in balance
     const EInsufficientBalance: u64 = 2; // Error code for insufficient platform balance
+    const EUnauthorizedAccess: u64 = 3; // Error code for unauthorized access
+    const ESubscriptionActive: u64 = 4; // Error code for active subscription
+    const ESubscriptionExpired: u64 = 5; // Error code for expired subscription
+    const EInvalidMovieID: u64 = 6; // Error code for invalid movie ID
+
+    // Helper function to add user to platform's user list
+    fun add_user_to_platform(platform: &mut Platform, user: address) {
+        vector::push_back<address>(&mut platform.users, user);
+    }
+
+    // Helper function to check if user is subscribed
+    fun is_user_subscribed(platform: &Platform, user: address, current_time: u64): bool {
+        let subscription = table::borrow<address, Subscription>(&platform.subscriptions, &user);
+        match subscription {
+            Some(sub) => current_time <= sub.end_date,
+            None => false,
+        }
+    }
 
     // Function to create a new Platform.
     public fun add_platform(
@@ -68,6 +97,7 @@ module suiflix::suiflix {
             users: vector::empty<address>(), // Initializing with empty user list
             movies: table::new<ID, Movie>(ctx), // Initializing empty movie table
             transactions: table::new<ID, ViewingTransaction>(ctx), // Initializing empty transaction table
+            subscriptions: table::new<address, Subscription>(ctx), // Initializing empty subscription table
             owner: tx_context::sender(ctx), // Setting the creator as the owner
         }
     }
@@ -88,7 +118,7 @@ module suiflix::suiflix {
         };
 
         // Adding the user to the Platform's user list
-        vector::push_back<address>(&mut platform.users, user);
+        add_user_to_platform(platform, user);
 
         new_user
     }
@@ -99,6 +129,8 @@ module suiflix::suiflix {
         user: &mut User,
         amount: u64,
         title: String,
+        description: String,
+        genre: String,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
@@ -109,11 +141,10 @@ module suiflix::suiflix {
             platform_id: user.platform_id,
             amount, // Setting the amount required to view the movie
             title,  // Setting the title of the movie
+            description, // Setting the description of the movie
+            genre, // Setting the genre of the movie
             added_date: clock::timestamp_ms(clock), // Setting the added date to current time
         };
-
-        // Increasing user's arrears by the amount of the movie
-        user.arrears = user.arrears + amount;
 
         // Adding the movie to the Platform's movie table
         table::add<ID, Movie>(&mut platform.movies, object::uid_to_inner(&movie.id), movie);
@@ -132,15 +163,19 @@ module suiflix::suiflix {
     public fun view_movie(
         platform: &mut Platform,
         user: &mut User,
-        amount: u64,
+        movie_id: ID,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
+        // Retrieve the movie from the platform
+        let movie = table::borrow<ID, Movie>(&platform.movies, &movie_id)
+            .expect(EInvalidMovieID);
+
         // Check if the User has enough balance to pay for the movie
-        assert!(balance::value(&user.balance) >= amount, EInsufficientFunds);
+        assert!(balance::value(&user.balance) >= movie.amount, EInsufficientFunds);
 
         // Deduct the amount from the User's balance
-        let viewing_amount = coin::take(&mut user.balance, amount, ctx);
+        let viewing_amount = coin::take(&mut user.balance, movie.amount, ctx);
 
         // Transfer the deducted amount to the Platform owner
         transfer::public_transfer(viewing_amount, platform.owner);
@@ -151,16 +186,13 @@ module suiflix::suiflix {
             id: transaction_id,
             user_id: object::id(user),
             platform_id: user.platform_id,
-            amount,
-            movie_id: 0, // Placeholder for the movie ID (can be updated to actual movie ID)
+            amount: movie.amount,
+            movie_id: movie_id,
             viewed_date: clock::timestamp_ms(clock), // Setting the viewed date to current time
         };
 
         // Add the viewing transaction to the Platform's transaction table
         table::add<ID, ViewingTransaction>(&mut platform.transactions, object::uid_to_inner(&transaction.id), transaction);
-
-        // Decrease the User's arrears by the amount paid
-        user.arrears = user.arrears - amount;
     }
 
     // Function to withdraw SUI tokens from the Platform's balance.
@@ -180,5 +212,72 @@ module suiflix::suiflix {
 
         // Transfer the withdrawn amount to the Platform owner
         transfer::public_transfer(withdrawn, platform.owner);
+    }
+
+    // New Feature: Subscribe to the Platform
+    public fun subscribe(
+        platform: &mut Platform,
+        user: &mut User,
+        amount: u64,
+        duration_ms: u64,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let current_time = clock::timestamp_ms(clock);
+
+        // Check if the user is already subscribed
+        assert!(!is_user_subscribed(platform, user.user, current_time), ESubscriptionActive);
+
+        // Check if the User has enough balance to pay for the subscription
+        assert!(balance::value(&user.balance) >= amount, EInsufficientFunds);
+
+        // Deduct the subscription amount from the User's balance
+        let subscription_amount = coin::take(&mut user.balance, amount, ctx);
+
+        // Transfer the deducted amount to the Platform owner
+        transfer::public_transfer(subscription_amount, platform.owner);
+
+        // Create a new subscription
+        let subscription = Subscription {
+            user: user.user,
+            platform_id: user.platform_id,
+            start_date: current_time,
+            end_date: current_time + duration_ms,
+        };
+
+        // Add the subscription to the Platform's subscription table
+        table::add<address, Subscription>(&mut platform.subscriptions, &user.user, subscription);
+    }
+
+    // Function for a User to view a movie with subscription
+    public fun view_movie_with_subscription(
+        platform: &mut Platform,
+        user: &mut User,
+        movie_id: ID,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let current_time = clock::timestamp_ms(clock);
+
+        // Check if the user has an active subscription
+        assert!(is_user_subscribed(platform, user.user, current_time), ESubscriptionExpired);
+
+        // Retrieve the movie from the platform
+        let movie = table::borrow<ID, Movie>(&platform.movies, &movie_id)
+            .expect(EInvalidMovieID);
+
+        // Create a new viewing transaction
+        let transaction_id = object::new(ctx);
+        let transaction = ViewingTransaction {
+            id: transaction_id,
+            user_id: object::id(user),
+            platform_id: user.platform_id,
+            amount: 0, // No charge for viewing with subscription
+            movie_id: movie_id,
+            viewed_date: current_time, // Setting the viewed date to current time
+        };
+
+        // Add the viewing transaction to the Platform's transaction table
+        table::add<ID, ViewingTransaction>(&mut platform.transactions, object::uid_to_inner(&transaction.id), transaction);
     }
 }
